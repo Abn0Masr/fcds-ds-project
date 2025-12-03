@@ -17,6 +17,7 @@ ui <- page_sidebar(
     h2("Algorithm Parameters"),
     sliderInput("support", label = "Min support value: ", min = 0.01, max = 1, value = 0.01, step = 0.01),
     sliderInput("confidence", label = "Confidence value: ", min = 0.4, max = 1, value = 0.4, step = 0.01),
+    sliderInput("clusters", "Number of Clusters:", min = 2, max = 6, value = 3),
     hr(),
     downloadButton("download_data", "Download Data")
   ),
@@ -25,9 +26,11 @@ ui <- page_sidebar(
     navset_tab(
       nav_panel(
         "Overview",
-        DT::dataTableOutput("overview_table"),
-        hr(),
-        plotOutput("outliers"),
+        layout_column_wrap(
+          card(card_header("Data overview"),card_body(DT::dataTableOutput("overview_table"))),
+          card(card_header("Data Clean"),card_body(plotOutput("cleaned"))),
+          width = 1
+        ),
         hr(),
         verbatimTextOutput("data_summary"),
         hr(),
@@ -97,7 +100,9 @@ ui <- page_sidebar(
       nav_panel(
         "Clusters",
         layout_column_wrap(
-          card(card_header("Clusters"), card_body(plotOutput("kmeans_plot"))),
+          card(card_header("Plot"), card_body(plotOutput("kmeans_plot"))),
+          card(card_header("plot"), card_body(plotOutput("kmeans_improve_plot"))),
+          card(card_header("Cluster Interpretation"), card_body(verbatimTextOutput("cluster_description")))
         ),
         verbatimTextOutput("kmeans_summary")
       ),
@@ -206,24 +211,25 @@ server <- function(input, output,session) {
       data[[col]][is.na(data[[col]])] <- mode_value
     }
     
-    data$Speed <- data$Distance / (data$DeliveryTime / 60)
+    data$Speed <- data$Distance / ((data$DeliveryTime-data$PreparationTime) / 60)
     
-    outliers(data %>% select(-OrderID) %>% select(where(is.numeric)))
-    
-    data_numeric_cols <- names(select(select(data, -OrderID), where(is.numeric)))
-    for (col in data_numeric_cols) {
-      Q1 <- quantile(data[[col]], 0.25, na.rm = TRUE)
-      Q3 <- quantile(data[[col]], 0.75, na.rm = TRUE)
-      IQR_val <- IQR(data[[col]], na.rm = TRUE)
-
-      lower_bound <- Q1 - 1.5 * IQR_val
-      upper_bound <- Q3 + 1.5 * IQR_val
-
-      data <- data[data[[col]] >= lower_bound & data[[col]] <= upper_bound, ]
+    remove_outliers <- function(df) {
+      num_cols <- names(df)[sapply(df, is.numeric)]
+      for (col in num_cols) {
+        Q1 <- quantile(df[[col]], 0.25, na.rm = TRUE)
+        Q3 <- quantile(df[[col]], 0.75, na.rm = TRUE)
+        IQR_val <- IQR(df[[col]], na.rm = TRUE)
+        
+        lower <- Q1 - 1.5 * IQR_val
+        upper <- Q3 + 1.5 * IQR_val
+        
+        df[[col]][df[[col]] < lower] <- lower
+        df[[col]][df[[col]] > upper] <- upper
+      }
+      return(df)
     }
-
-    Q3_time <- quantile(data$DeliveryTime, probs = 0.75)
-    data$DeliveryLate <- ifelse(data$DeliveryTime >= Q3_time, "Late", "Ontime")
+    
+    data <- remove_outliers(data)
     
     data <- data %>%
       mutate(
@@ -232,34 +238,44 @@ server <- function(input, output,session) {
         Traffic = as.factor(Traffic),
         Time = as.factor(Time),
         Vehicle = as.factor(Vehicle),
-        DeliveryLate = as.factor(DeliveryLate),
         Experience = as.numeric(Experience),
         Speed = as.numeric(Speed),
         Distance = as.numeric(Distance),
-        PreparationTime = as.numeric(PreparationTime)
+        PreparationTime = as.numeric(PreparationTime),
+        DeliveryTime = as.numeric(DeliveryTime)
       )
+    
+    Q3_time <- quantile(data$DeliveryTime, probs = 0.75)
+    data$DeliveryLate <- as.factor(ifelse(data$DeliveryTime >= Q3_time, "Late", "Ontime"))
 
-    df_k <- data %>% select(DeliveryTime, Distance, Experience, Speed, PreparationTime)
+    df_k <- data %>% select(Distance,DeliveryTime,Speed,Experience,PreparationTime)
     scaled_df <- scale(df_k)
     
-    km <- kmeans(scaled_df, centers = 4, nstart = 50)
+    set.seed(123)
+    km <- kmeans(scaled_df, centers = input$clusters, nstart = 50)
     kmeans_result(list(km = km, scaled_df = scaled_df))
     
-    data$Cluster <- km$cluster
+    data$Cluster <- as.factor(km$cluster)
     
-    cluster_means <- data %>%
+    cluster_summary <- data %>%
       group_by(Cluster) %>%
       summarise(
-        AvgDeliveryTime = mean(DeliveryTime),
-        AvgSpeed = mean(Speed)
+        AvgDistance = mean(Distance),
+        AvgDelivery = mean(DeliveryTime),
+        AvgSpeed = mean(Speed),
+        AvgExp = mean(Experience),
+        AvgPrep = mean(PreparationTime)
       ) %>%
-      ungroup() %>%
-      arrange(AvgDeliveryTime)
+      mutate(
+        Rating = 
+          ifelse(AvgDistance < median(AvgDistance), 1, 0) +
+          ifelse(AvgDelivery < median(AvgDelivery), 1, 0) +
+          ifelse(AvgSpeed > median(AvgSpeed), 1, 0) +
+          ifelse(AvgExp > median(AvgExp), 1, 0) +
+          ifelse(AvgPrep < median(AvgPrep), 1, 0)
+      )
     
-    risk_labels <- c("Low Risk", "Standard Risk", "High Risk", "Very High Risk")
-    risk_mapping <- setNames(risk_labels, cluster_means$Cluster)
-    
-    data$RiskDelivery <- factor(data$Cluster, levels = names(risk_mapping), labels = risk_mapping)
+    data <- data %>% left_join(cluster_summary %>% select(Cluster, Rating), by = "Cluster")
     
     data
   })
@@ -274,16 +290,16 @@ server <- function(input, output,session) {
 
     # data overview
     output$overview_table <- DT::renderDataTable({
-      DT::datatable(data, options = list(pageLength = 10))
+      DT::datatable(data, options = list(pageLength = 5))
+    })
+    output$cleaned <- renderPlot({
+      boxplot(data %>% select(where(is.numeric),-OrderID))
     })
     output$data_summary <- renderPrint({
       summary(data)
     })
     output$data_structure <- renderPrint({
       str(data)
-    })
-    output$outliers <- renderPlot({
-      boxplot(outliers())
     })
 
     # Overall Delivery Time
@@ -419,7 +435,7 @@ server <- function(input, output,session) {
 
     # Correlation
     output$corr <- renderPlot({
-      df <- data %>% select(Distance, DeliveryTime, Speed, PreparationTime, Experience)
+      df <- data %>% select(Distance, DeliveryTime, Speed, PreparationTime, Experience,Rating)
       cor_matrix <- cor(df)
       ggcorrplot(cor_matrix,
         hc.order = TRUE, type = "lower",
@@ -459,7 +475,7 @@ server <- function(input, output,session) {
           rhs = grep("DeliveryLate=Late", itemLabels(trans), value = TRUE)
         )
       )
-      plot(ru, method = "graph", control = list(reorder = TRUE), limit = 15)
+      plot(ru, method = "group", control = list(reorder = TRUE), limit = 10)
     })
     output$rule_ontime <- renderPlot({
       df <- data %>% select(Traffic, Vehicle, DeliveryLate, Weather, Time)
@@ -471,16 +487,11 @@ server <- function(input, output,session) {
           rhs = grep("DeliveryLate=Ontime", itemLabels(trans), value = TRUE)
         )
       )
-      plot(ru, method = "graph", control = list(reorder = TRUE), limit = 15)
+      plot(ru, method = "group", control = list(reorder = TRUE), limit = 10)
     })
 
+    # kmeans
     output$kmeans_plot <- renderPlot({
-      cluster_labels <- c(
-        "Short-Distance, Quick-Deliveries, Low-Risk",
-        "Standard-Distance, Slowly-Deliveries, High-Risk",
-        "Long-Distance, Long-Deliveries, Standard-Risk"
-      )
-      
       fviz_cluster(
         kmeans_result()$km,
         data = kmeans_result()$scaled_df,
@@ -489,11 +500,45 @@ server <- function(input, output,session) {
         palette = "jco",
         ggtheme = theme_minimal(),
         show.clust.cent = TRUE
-      ) + scale_color_discrete(labels = cluster_labels)
+      )
       
+    })
+    output$kmeans_improve_plot <- renderPlot({
+      fviz_nbclust(kmeans_result()$scaled_df, kmeans, method = "silhouette")
     })
     output$kmeans_summary <- renderPrint({
       kmeans_result()$km
+    })
+    output$cluster_description <- renderPrint({
+      km <- kmeans_result()
+      
+      df <- data %>% 
+        select(Cluster, Distance, DeliveryTime, Speed, Experience,PreparationTime)
+      
+      summary_df <- df %>%
+        group_by(Cluster) %>%
+        summarise(
+          AvgDistance = mean(Distance),
+          AvgDelivery = mean(DeliveryTime),
+          AvgSpeed = mean(Speed),
+          AvgExp = mean(Experience),
+          AvgPrep = mean(PreparationTime)
+        )
+      
+      descriptions <- c()
+      
+      for (i in 1:nrow(summary_df)) {
+        row <- summary_df[i, ]
+        
+        dist_label <- ifelse(row$AvgDistance < median(summary_df$AvgDistance), "Short Distance", "Long Distance")
+        del_label <- ifelse(row$AvgDelivery < median(summary_df$AvgDelivery),"Fast Delivery", "Slow Delivery")
+        speed_label <- ifelse(row$AvgSpeed > median(summary_df$AvgSpeed),"High Speed", "Low Speed")
+        exp_label <- ifelse(row$AvgExp > median(summary_df$AvgExp),"Experienced Courier", "Low Experience Courier")
+        prep_label <- ifelse(row$AvgPrep < median(summary_df$AvgPrep),"Fast Preparation", "Slow Preparation")
+        descriptions[i] <- paste0("Cluster ", row$Cluster, ": ",dist_label, " — ",del_label, " — ",speed_label, " — ",exp_label," - ",prep_label)
+      }
+      
+      cat(paste(descriptions, collapse = "\n\n"))
     })
     
     if (!is.null(data)) {
