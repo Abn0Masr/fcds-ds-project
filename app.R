@@ -17,7 +17,7 @@ ui <- page_sidebar(
     h2("Algorithm Parameters"),
     sliderInput("support", label = "Min support value: ", min = 0.01, max = 1, value = 0.01, step = 0.01),
     sliderInput("confidence", label = "Confidence value: ", min = 0.4, max = 1, value = 0.4, step = 0.01),
-    sliderInput("clusters", "Number of Clusters:", min = 2, max = 6, value = 3),
+    sliderInput("clusters", "Number of Clusters:", min = 2, max = 10, value = 3),
     hr(),
     downloadButton("download_data", "Download Data")
   ),
@@ -27,8 +27,9 @@ ui <- page_sidebar(
       nav_panel(
         "Overview",
         layout_column_wrap(
-          card(card_header("Data overview"),card_body(DT::dataTableOutput("overview_table"))),
-          card(card_header("Data Clean"),card_body(plotOutput("cleaned"))),
+          card(card_header("Data overview"), card_body(DT::dataTableOutput("overview_table"))),
+          card(card_header("Data before clean"), card_body(plotOutput("before_cleaned"))),
+          card(card_header("Data Clean"), card_body(plotOutput("cleaned"))),
           width = 1
         ),
         hr(),
@@ -113,7 +114,7 @@ ui <- page_sidebar(
         numericInput("new_prep", "Preparation Time (min):", value = 10, min = 0),
         numericInput("new_experience", "Courier Experience (yrs):", value = 1, min = 0),
         numericInput("new_delivery", "Delivery Time (min):", value = 30, min = 0),
-        selectInput("new_weather", "Weather:", choices = c("Clear", "Foggy", "Rainy","Snowy","Windy")),
+        selectInput("new_weather", "Weather:", choices = c("Clear", "Foggy", "Rainy", "Snowy", "Windy")),
         selectInput("new_traffic", "Traffic:", choices = c("Low", "Medium", "High")),
         selectInput("new_time", "Time of Day:", choices = c("Morning", "Afternoon", "Evening", "Night")),
         selectInput("new_vehicle", "Vehicle:", choices = c("Bike", "Car", "Scooter")),
@@ -124,11 +125,11 @@ ui <- page_sidebar(
 )
 
 
-server <- function(input, output,session) {
+server <- function(input, output, session) {
   # add data
-  dataload <- reactiveVal(NULL)
+  dataload <- reactiveVal()
   outliers <- reactiveVal()
-  kmeans_result <- reactiveVal(NULL)
+  kmeans_result <- reactiveVal()
 
   # handle data insert
   observeEvent(input$add_record, {
@@ -143,7 +144,7 @@ server <- function(input, output,session) {
       Time_of_Day = input$new_time,
       Vehicle_Type = input$new_vehicle
     )
-    
+
     if (!is.null(dataload()) && input$order_id %in% dataload()$Order_ID) {
       showNotification(paste0("Order ID ", input$order_id, " already exists!"), type = "error", duration = 3)
       return(NULL)
@@ -156,7 +157,7 @@ server <- function(input, output,session) {
     }
 
     showNotification(paste0("Order", input$order_id, "was added"), type = "default", duration = 2)
-    
+
     updateNumericInput(session, "order_id", value = max(dataload()$Order_ID) + 1)
     updateNumericInput(session, "new_distance", value = 5)
     updateNumericInput(session, "new_prep", value = 10)
@@ -168,10 +169,18 @@ server <- function(input, output,session) {
     updateSelectInput(session, "new_vehicle", selected = "Bike")
   })
   observeEvent(input$dataset, {
-    if (!is.null(input$dataset)) {
-      user_data <- read.csv(input$dataset$datapath)
-      dataload(rbind(dataload(), user_data))
+    req(input$dataset)
+    user_data <- read.csv(input$dataset$datapath)
+    
+    required_cols <- c("Order_ID","Distance_km","Preparation_Time_min","Courier_Experience_yrs",
+                       "Delivery_Time_min","Weather","Traffic_Level","Time_of_Day","Vehicle_Type")
+    
+    if (!all(required_cols %in% colnames(user_data))) {
+      showNotification("Invalid dataset file!", type = "error")
+      return(NULL)
     }
+    
+    dataload(rbind(dataload(), user_data))
   })
 
   # data clean
@@ -210,27 +219,29 @@ server <- function(input, output,session) {
       data[[col]][data[[col]] == ""] <- NA
       data[[col]][is.na(data[[col]])] <- mode_value
     }
-    
-    data$Speed <- data$Distance / ((data$DeliveryTime-data$PreparationTime) / 60)
-    
+
+    data$Speed <- data$Distance / ((data$DeliveryTime) / 60)
+
+    outliers(data %>% select(where(is.numeric), -OrderID))
+
     remove_outliers <- function(df) {
       num_cols <- names(df)[sapply(df, is.numeric)]
       for (col in num_cols) {
         Q1 <- quantile(df[[col]], 0.25, na.rm = TRUE)
         Q3 <- quantile(df[[col]], 0.75, na.rm = TRUE)
         IQR_val <- IQR(df[[col]], na.rm = TRUE)
-        
+
         lower <- Q1 - 1.5 * IQR_val
         upper <- Q3 + 1.5 * IQR_val
-        
+
         df[[col]][df[[col]] < lower] <- lower
         df[[col]][df[[col]] > upper] <- upper
       }
       return(df)
     }
-    
+
     data <- remove_outliers(data)
-    
+
     data <- data %>%
       mutate(
         OrderID = as.integer(OrderID),
@@ -244,39 +255,31 @@ server <- function(input, output,session) {
         PreparationTime = as.numeric(PreparationTime),
         DeliveryTime = as.numeric(DeliveryTime)
       )
-    
-    Q3_time <- quantile(data$DeliveryTime, probs = 0.75)
-    data$DeliveryLate <- as.factor(ifelse(data$DeliveryTime >= Q3_time, "Late", "Ontime"))
 
-    df_k <- data %>% select(Distance,DeliveryTime,Speed,Experience,PreparationTime)
+    Q1_speed <- quantile(data$Speed, 0.25, na.rm = TRUE)
+    data$DeliveryLate <- as.factor(ifelse(data$Speed <= Q1_speed, "Late", "Ontime"))
+
+    df_k <- data %>% select(Speed, Experience)
     scaled_df <- scale(df_k)
-    
+
     set.seed(123)
     km <- kmeans(scaled_df, centers = input$clusters, nstart = 50)
     kmeans_result(list(km = km, scaled_df = scaled_df))
-    
+
     data$Cluster <- as.factor(km$cluster)
-    
+
     cluster_summary <- data %>%
       group_by(Cluster) %>%
       summarise(
-        AvgDistance = mean(Distance),
-        AvgDelivery = mean(DeliveryTime),
         AvgSpeed = mean(Speed),
         AvgExp = mean(Experience),
-        AvgPrep = mean(PreparationTime)
       ) %>%
       mutate(
-        Rating = 
-          ifelse(AvgDistance < median(AvgDistance), 1, 0) +
-          ifelse(AvgDelivery < median(AvgDelivery), 1, 0) +
-          ifelse(AvgSpeed > median(AvgSpeed), 1, 0) +
-          ifelse(AvgExp > median(AvgExp), 1, 0) +
-          ifelse(AvgPrep < median(AvgPrep), 1, 0)
+        Rating = ifelse(AvgSpeed > median(AvgSpeed), 1, 0) +ifelse(AvgExp > median(AvgExp), 1, 0)
       )
-    
+
     data <- data %>% left_join(cluster_summary %>% select(Cluster, Rating), by = "Cluster")
-    
+
     data
   })
 
@@ -290,16 +293,20 @@ server <- function(input, output,session) {
 
     # data overview
     output$overview_table <- DT::renderDataTable({
+      data$Speed <- as.integer(data$Speed)
       DT::datatable(data, options = list(pageLength = 5))
     })
     output$cleaned <- renderPlot({
-      boxplot(data %>% select(where(is.numeric),-OrderID))
+      boxplot(data %>% select(where(is.numeric), -OrderID))
     })
     output$data_summary <- renderPrint({
       summary(data)
     })
     output$data_structure <- renderPrint({
       str(data)
+    })
+    output$before_cleaned <- renderPlot({
+      boxplot(outliers())
     })
 
     # Overall Delivery Time
@@ -435,7 +442,7 @@ server <- function(input, output,session) {
 
     # Correlation
     output$corr <- renderPlot({
-      df <- data %>% select(Distance, DeliveryTime, Speed, PreparationTime, Experience,Rating)
+      df <- data %>% select(Distance, DeliveryTime, Speed, PreparationTime, Experience, Rating)
       cor_matrix <- cor(df)
       ggcorrplot(cor_matrix,
         hc.order = TRUE, type = "lower",
@@ -475,7 +482,7 @@ server <- function(input, output,session) {
           rhs = grep("DeliveryLate=Late", itemLabels(trans), value = TRUE)
         )
       )
-      plot(ru, method = "group", control = list(reorder = TRUE), limit = 10)
+      plot(ru, method = "graph", control = list(reorder = TRUE), limit = 10)
     })
     output$rule_ontime <- renderPlot({
       df <- data %>% select(Traffic, Vehicle, DeliveryLate, Weather, Time)
@@ -487,7 +494,7 @@ server <- function(input, output,session) {
           rhs = grep("DeliveryLate=Ontime", itemLabels(trans), value = TRUE)
         )
       )
-      plot(ru, method = "group", control = list(reorder = TRUE), limit = 10)
+      plot(ru, method = "graph", control = list(reorder = TRUE), limit = 10)
     })
 
     # kmeans
@@ -501,7 +508,6 @@ server <- function(input, output,session) {
         ggtheme = theme_minimal(),
         show.clust.cent = TRUE
       )
-      
     })
     output$kmeans_improve_plot <- renderPlot({
       fviz_nbclust(kmeans_result()$scaled_df, kmeans, method = "silhouette")
@@ -511,36 +517,30 @@ server <- function(input, output,session) {
     })
     output$cluster_description <- renderPrint({
       km <- kmeans_result()
-      
-      df <- data %>% 
-        select(Cluster, Distance, DeliveryTime, Speed, Experience,PreparationTime)
-      
+
+      df <- data %>%
+        select(Speed, Experience,Cluster)
+
       summary_df <- df %>%
         group_by(Cluster) %>%
         summarise(
-          AvgDistance = mean(Distance),
-          AvgDelivery = mean(DeliveryTime),
           AvgSpeed = mean(Speed),
           AvgExp = mean(Experience),
-          AvgPrep = mean(PreparationTime)
         )
       
-      descriptions <- c()
-      
+      descriptions<-c()
+
       for (i in 1:nrow(summary_df)) {
         row <- summary_df[i, ]
-        
-        dist_label <- ifelse(row$AvgDistance < median(summary_df$AvgDistance), "Short Distance", "Long Distance")
-        del_label <- ifelse(row$AvgDelivery < median(summary_df$AvgDelivery),"Fast Delivery", "Slow Delivery")
-        speed_label <- ifelse(row$AvgSpeed > median(summary_df$AvgSpeed),"High Speed", "Low Speed")
-        exp_label <- ifelse(row$AvgExp > median(summary_df$AvgExp),"Experienced Courier", "Low Experience Courier")
-        prep_label <- ifelse(row$AvgPrep < median(summary_df$AvgPrep),"Fast Preparation", "Slow Preparation")
-        descriptions[i] <- paste0("Cluster ", row$Cluster, ": ",dist_label, " — ",del_label, " — ",speed_label, " — ",exp_label," - ",prep_label)
+
+        speed_label <- ifelse(row$AvgSpeed > median(summary_df$AvgSpeed), "High Speed", "Low Speed")
+        exp_label <- ifelse(row$AvgExp > median(summary_df$AvgExp), "Experienced Courier", "Low Experience Courier")
+        descriptions[i] <- paste0("Cluster ", row$Cluster, ": ", speed_label, " — ", exp_label)
       }
-      
+
       cat(paste(descriptions, collapse = "\n\n"))
     })
-    
+
     if (!is.null(data)) {
       output$download_data <- downloadHandler(
         filename = function() {
