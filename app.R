@@ -5,8 +5,10 @@ library(arulesViz)
 library(dplyr)
 library(ggplot2)
 library(factoextra)
+library(cluster)
 library(DT)
 library(ggcorrplot)
+
 
 ui <- page_sidebar(
   "Food Delivery",
@@ -24,6 +26,7 @@ ui <- page_sidebar(
   mainPanel(
     width = 12,
     navset_tab(
+      id = "tabs",
       nav_panel(
         "Overview",
         layout_column_wrap(
@@ -31,79 +34,53 @@ ui <- page_sidebar(
           card(card_header("Data before clean"), card_body(plotOutput("before_cleaned"))),
           card(card_header("Data Clean"), card_body(plotOutput("cleaned"))),
           width = 1
-        ),
-        hr(),
-        verbatimTextOutput("data_summary"),
-        hr(),
-        verbatimTextOutput("data_structure"),
+        )
       ),
       nav_panel(
         "Overall and Spread Delivery Time",
         layout_column_wrap(
-          card(card_header("Distance vs Delivery time"), card_body(plotOutput("distance_delivery_time"))),
-          card(card_header("Experience vs Delivery time"), card_body(plotOutput("experience_delivery_time"))),
-          card(card_header("PreparationTime vs Delivery time"), card_body(plotOutput("prep_delivery_time"))),
+          card(card_header("Delivery time frequancy"), card_body(plotOutput("hist_delivery_time"))),
+          card(card_header("Delivery time central tendency"), card_body(plotOutput("centeral_delivery_time"))),
           width = 1,
+        ),
+        layout_column_wrap(
+          value_box(title = "Mean",value = textOutput("mean")),
+          value_box(title = "Median",value = textOutput("median")),
+          value_box(title = "Min",value = textOutput("min")),
+          value_box(title = "Max",value = textOutput("max"))
         )
       ),
       nav_panel(
-        "Delivery by Vehicle Type",
+        "Vehicle performance",
+        layout_column_wrap(
+          card(card_header("Percentage of Orders by Vehicle Type"), card_body(plotOutput("perc_orders_vehicle"))),
+          card(card_header("Percentage of Status Delivery by Vehicle Type"), card_body(plotOutput("perc_setuts_del_vehicle"))),
+          width = 1/2
+        ),
         layout_column_wrap(
           card(card_header("Vehicle vs delivery time"), card_body(plotOutput("vehicle_delivery_time"))),
-          layout_column_wrap(
-            card(card_header("Vehicle vs delivery late"), card_body(plotOutput("vehicle_delivery_late"))),
-            card(card_header("Orders by vehicle"), card_body(plotOutput("vehicle_orders"))),
-            width = 1 / 2
-          ),
+          card(card_header("Vehicle vs experience"), card_body(plotOutput("vehicle_experience"))),
+          card(card_header("Vehicle vs distance"), card_body(plotOutput("vehicle_distance"))),
+          card(card_header("Vehicle vs speed"), card_body(plotOutput("vehicle_speed"))),
           width = 1
-        ),
-      ),
-      nav_panel(
-        "Numerical Distribution",
-        layout_column_wrap(
-          card(card_header("Distribution of Distance"), card_body(plotOutput("distribution_distance"))),
-          card(card_header("Distribution of Preparation Time"), card_body(plotOutput("distribution_prep"))),
-          card(card_header("Distribution of Speed"), card_body(plotOutput("distribution_speed"))),
-          card(card_header("Distribution of Delivery Time"), card_body(plotOutput("distribution_delivery_time"))),
-          card(card_header("Distribution of Experience"), card_body(plotOutput("distribution_Experience"))),
-          width = 1 / 2
         )
       ),
-      nav_panel(
-        "Orders by Category",
-        layout_column_wrap(
-          card(card_header("Trafic"), card_body(plotOutput("trafic_orders"))),
-          card(card_header("Weather"), card_body(plotOutput("weather_orders"))),
-          card(card_header("Time"), card_body(plotOutput("time_orders"))),
-          card(card_header("Delivery Late"), card_body(plotOutput("delivery_late_orders"))),
-          width = 1 / 2
-        ),
-      ),
-      nav_panel(
-        "Correlation",
-        plotOutput("corr")
-      ),
-      nav_panel(
-        "Delivery Time Throughout Day",
-        layout_column_wrap(
-          card(card_header("Delivery Time by Time of Day"), card_body(plotOutput("time_by_time"))),
-          card(card_header("Delivery Time by Weather of Day"), card_body(plotOutput("time_by_weather"))),
-          card(card_header("Delivery Time by Traffic of Day"), card_body(plotOutput("time_by_traffic"))),
-          width = 1
-        ),
-      ),
+      nav_panel("Distribution",uiOutput("num_distrbution")),
+      nav_panel("Orders by Category",uiOutput("ordrByctgry")),
+      nav_panel("Correlation",plotOutput("corr")),
+      nav_panel("Delivery Time Throughout Day",uiOutput("del_time_day")),
       nav_panel(
         "Association Rules",
-        plotOutput("rule_late"),
-        hr(),
-        plotOutput("rule_ontime"),
+        navset_tab(
+          nav_panel("Patterns lead to late delivery",plotOutput("rule_late")),
+          nav_panel("Patterns lead to ontime delivery",plotOutput("rule_ontime"))
+        )
       ),
       nav_panel(
         "Clusters",
         layout_column_wrap(
           card(card_header("Plot"), card_body(plotOutput("kmeans_plot"))),
           card(card_header("plot"), card_body(plotOutput("kmeans_improve_plot"))),
-          card(card_header("Cluster Interpretation"), card_body(verbatimTextOutput("cluster_description")))
         ),
         verbatimTextOutput("kmeans_summary")
       ),
@@ -181,6 +158,7 @@ server <- function(input, output, session) {
     }
     
     dataload(rbind(dataload(), user_data))
+    updateNumericInput(session, "order_id", value = max(dataload()$Order_ID) + 1)
   })
 
   # data clean
@@ -191,6 +169,7 @@ server <- function(input, output, session) {
       return(NULL)
     }
 
+    # Rename data to be easy understand
     data <- data %>% rename(
       OrderID = Order_ID,
       Distance = Distance_km,
@@ -203,27 +182,26 @@ server <- function(input, output, session) {
       DeliveryTime = Delivery_Time_min
     )
 
+    # Replace NA values with median to more accurate analysis
     data_numeric_cols <- names(select(select(data, -OrderID), where(is.numeric)))
     for (col in data_numeric_cols) {
       data[[col]][is.na(data[[col]])] <- median(data[[col]], na.rm = TRUE)
     }
 
+    # Replace NA values with mod to more accurate analysis
+    data_factor_cols <- names(select(data, where(is.character), where(is.factor)))
     get_mod <- function(x) {
       ux <- unique(x)
       ux[which.max(tabulate(match(x, ux)))]
     }
-    data_factor_cols <- names(select(data, where(is.character), where(is.factor)))
-
     for (col in data_factor_cols) {
       mode_value <- get_mod(data[[col]])
       data[[col]][data[[col]] == ""] <- NA
       data[[col]][is.na(data[[col]])] <- mode_value
     }
 
-    data$Speed <- data$Distance / ((data$DeliveryTime) / 60)
-
-    outliers(data %>% select(where(is.numeric), -OrderID))
-
+    # Replace outliers with upper or lower bounders
+    outliers(data %>% select(where(is.numeric), -OrderID)) # Add data before remove outliers to detect him and show
     remove_outliers <- function(df) {
       num_cols <- names(df)[sapply(df, is.numeric)]
       for (col in num_cols) {
@@ -239,9 +217,9 @@ server <- function(input, output, session) {
       }
       return(df)
     }
-
     data <- remove_outliers(data)
 
+    # Convert columns to correct type to use
     data <- data %>%
       mutate(
         OrderID = as.integer(OrderID),
@@ -250,100 +228,88 @@ server <- function(input, output, session) {
         Time = as.factor(Time),
         Vehicle = as.factor(Vehicle),
         Experience = as.numeric(Experience),
-        Speed = as.numeric(Speed),
         Distance = as.numeric(Distance),
         PreparationTime = as.numeric(PreparationTime),
         DeliveryTime = as.numeric(DeliveryTime)
       )
+    
+    data$Speed <- data$Distance / (data$DeliveryTime/60)
+    
+    ml <- lm(DeliveryTime ~ Distance +Experience+ Traffic + Weather + Vehicle, data=data)
+    newData<-predict(ml,data)
+    data$ExpectedTime <- newData
+    data$DeliveryLate <- as.factor(ifelse(data$DeliveryTime > data$ExpectedTime, "Late", "Ontime"))
+    data <- data %>% select(-ExpectedTime)
 
-    Q1_speed <- quantile(data$Speed, 0.25, na.rm = TRUE)
-    data$DeliveryLate <- as.factor(ifelse(data$Speed <= Q1_speed, "Late", "Ontime"))
-
-    df_k <- data %>% select(Speed, Experience)
+    df_k <- data %>% select(Distance,DeliveryTime)
     scaled_df <- scale(df_k)
 
-    set.seed(123)
-    km <- kmeans(scaled_df, centers = input$clusters, nstart = 50)
+    km <- kmeans(scaled_df, centers = input$clusters)
     kmeans_result(list(km = km, scaled_df = scaled_df))
 
     data$Cluster <- as.factor(km$cluster)
 
-    cluster_summary <- data %>%
-      group_by(Cluster) %>%
-      summarise(
-        AvgSpeed = mean(Speed),
-        AvgExp = mean(Experience),
-      ) %>%
-      mutate(
-        Rating = ifelse(AvgSpeed > median(AvgSpeed), 1, 0) +ifelse(AvgExp > median(AvgExp), 1, 0)
-      )
-
-    data <- data %>% left_join(cluster_summary %>% select(Cluster, Rating), by = "Cluster")
-
     data
   })
-
-  # app
-  observeEvent(dataset(), {
-    data <- dataset()
-
-    if (is.null(data)) {
-      return(NULL)
-    }
-
-    # data overview
+  
+  # data overview
+  observe({
+    req(dataset())
+    data<-dataset()
+    
     output$overview_table <- DT::renderDataTable({
       data$Speed <- as.integer(data$Speed)
       DT::datatable(data, options = list(pageLength = 5))
     })
-    output$cleaned <- renderPlot({
-      boxplot(data %>% select(where(is.numeric), -OrderID))
-    })
-    output$data_summary <- renderPrint({
-      summary(data)
-    })
-    output$data_structure <- renderPrint({
-      str(data)
-    })
     output$before_cleaned <- renderPlot({
       boxplot(outliers())
     })
-
-    # Overall Delivery Time
-    output$distance_delivery_time <- renderPlot({
-      ggplot(data, aes(x = Distance, y = DeliveryTime, colour = Vehicle)) +
-        geom_point(alpha = 0.5) +
-        geom_smooth(method = "lm", se = TRUE, colour = "black") +
-        labs(x = "Distance (km)", y = "Delivery Time (min)") +
+    output$cleaned <- renderPlot({
+      boxplot(data %>% select(where(is.numeric), -OrderID))
+    })
+  })
+  
+  # Overall Delivery Time
+  observe({
+    req(dataset())
+    data<-dataset()
+    
+    output$hist_delivery_time <- renderPlot({
+      ggplot(data, aes(DeliveryTime)) +
+        geom_histogram(fill = "steelblue", color = "black") +
+        labs(x = "Delivery Time (min)", title = "Delivery time frequancy") +
         theme_minimal()
     })
-    output$experience_delivery_time <- renderPlot({
-      ggplot(data, aes(x = Experience, y = DeliveryTime)) +
-        geom_point(alpha = 0.5) +
-        geom_smooth(method = "lm", se = TRUE, colour = "blue") +
-        labs(x = "Experience (years)", y = "Delivery Time (min)") +
+    output$centeral_delivery_time <- renderPlot({
+      ggplot(data, aes(y=DeliveryTime)) +
+        geom_boxplot(fill = "skyblue") +
+        labs(y = "Delivery Time (min)",title="Delivery time centeral tendency") +
         theme_minimal()
     })
-    output$prep_delivery_time <- renderPlot({
-      ggplot(data, aes(x = PreparationTime, y = DeliveryTime)) +
-        geom_point(alpha = 0.5) +
-        geom_smooth(method = "lm", se = TRUE, colour = "blue") +
-        labs(x = "Preparation Time (min)", y = "Delivery Time (min)") +
-        theme_minimal()
+    output$mean <- renderText({
+      mean(data$DeliveryTime, na.rm = TRUE)
     })
-
-    # Delivery by Vehicle Type
-    output$vehicle_delivery_time <- renderPlot({
-      ggplot(data, aes(x = Vehicle, y = DeliveryTime, fill = Vehicle)) +
-        geom_boxplot() +
-        labs(title = "Delivery Time Distribution by Vehicle", x = "Vehicle", y = "Delivery Time (min)") +
-        theme_minimal()
+    output$median <- renderText({
+      median(data$DeliveryTime, na.rm = TRUE)
     })
-    output$vehicle_delivery_late <- renderPlot({
+    output$min <- renderText({
+      min(data$DeliveryTime, na.rm = TRUE)
+    })
+    output$max <- renderText({
+      max(data$DeliveryTime, na.rm = TRUE)
+    })
+  })
+  
+  # Delivery by Vehicle Type
+  observe({
+    req(dataset())
+    data<-dataset()
+    
+    output$perc_setuts_del_vehicle <- renderPlot({
       df <- data %>%
         group_by(Vehicle, DeliveryLate) %>%
         summarize(count = n())
-
+      
       ggplot(df, aes(x = Vehicle, y = count, fill = DeliveryLate)) +
         geom_col(position = "fill") +
         scale_y_continuous(labels = scales::percent) +
@@ -355,149 +321,149 @@ server <- function(input, output, session) {
         ) +
         theme_minimal()
     })
-    output$vehicle_orders <- renderPlot({
-      ggplot(data, aes(x = Vehicle, fill = Vehicle)) +
+    output$perc_orders_vehicle<-renderPlot({
+      vehicle_counts <- data %>%
+        count(Vehicle) %>%
+        mutate(perc = round(n / sum(n) * 100, 1),
+               label = paste0(Vehicle, " (", perc, "%)"))
+      
+      pie(vehicle_counts$perc,
+          labels = vehicle_counts$label,
+          main = "Percentage of Orders by Vehicle Type")
+    })
+    output$vehicle_delivery_time <- renderPlot({
+      ggplot(data, aes(x = Vehicle, y = DeliveryTime, fill = Vehicle)) +
+        geom_boxplot() +
+        labs(title = "Delivery Time Distribution by Vehicle", x = "Vehicle", y = "Delivery Time (min)") +
+        theme_minimal()
+    })
+    output$vehicle_experience <- renderPlot({
+      ggplot(data, aes(x = Vehicle, y = Experience, fill = Vehicle)) +
+        geom_boxplot() +
+        labs(title = "Experience by Vehicle", x = "Vehicle", y = "Experience (years)") +
+        theme_minimal()
+    })
+    output$vehicle_distance <- renderPlot({
+      ggplot(data, aes(x = Vehicle, y = Distance, fill = Vehicle)) +
+        geom_boxplot() +
+        labs(title = "Distance by Vehicle", x = "Vehicle", y = "Distance (km)") +
+        theme_minimal()
+    })
+    output$vehicle_speed <- renderPlot({
+      ggplot(data, aes(x = Vehicle, y = Speed, fill = Vehicle)) +
+        geom_boxplot() +
+        labs(title = "Speed by Vehicle", x = "Vehicle", y = "Speed (km/h)") +
+        theme_minimal()
+    })
+  })
+  
+  # Distribution
+  observe({
+    req(dataset())
+    data<-dataset()
+    
+    distribution_cols<-c("Distance","PreparationTime","Speed","Experience")
+    distribution_by_col<-function(data,column){
+      ggplot(data, aes_string(x = column)) +
+        geom_histogram(binwidth = 2, fill = "steelblue", color = "black") +
+        labs(x = column, y = "Frequency") +
+        theme_minimal()
+    }
+    
+    output$num_distrbution<-renderUI({
+      plot_list <- lapply(distribution_cols, function(col){
+        card(card_body(plotOutput(paste0("num_distrbution_",col))))
+      })
+      do.call(layout_column_wrap,c(plot_list, list(width = 1/2)))
+    })
+    for(col in distribution_cols) {
+      local({
+        mycol <- col
+        output[[paste0("num_distrbution_", mycol)]] <- renderPlot({distribution_by_col(data, mycol)})
+      })
+    }
+  })
+  
+  # Orders by Category
+  observe({
+    req(dataset())
+    data<-dataset()
+    
+    ordrByctgry<-c("Traffic","Weather","Time","DeliveryLate") # cols want present
+    count_by_categoral<-function(data,column) {
+      ggplot(data, aes_string(x = column, fill = column)) +
         geom_bar() +
         labs(
-          title = "Number of orders for Vehicle",
+          title = paste("Number of orders for",column),
           y = "Count of Orders",
-          x = " Vehicle"
+          x = column
         ) +
         theme_minimal()
+    }
+    
+    output$ordrByctgry<-renderUI({
+      plot_list <- lapply(ordrByctgry, function(col) {
+        card(card_body(plotOutput(paste0("plot_", col))))
+      })
+      do.call(layout_column_wrap,c(plot_list, list(width = 1/2)))
     })
-
-    # Numerical Feature Distribution
-    output$distribution_distance <- renderPlot({
-      ggplot(data, aes(x = Distance)) +
-        geom_histogram(binwidth = 2, fill = "steelblue", color = "black") +
-        labs(x = "Distance (km)", y = "Frequency") +
+    for(col in ordrByctgry) {
+      local({
+        mycol <- col
+        output[[paste0("plot_", mycol)]] <- renderPlot({count_by_categoral(data, mycol)})
+      })
+    }
+  })
+  
+  # Delivery Time Throughout Day
+  observe({
+    req(dataset())
+    data<-dataset()
+    
+    render_plot<-function(data,column) {
+      ggplot(data, aes_string(x = column, y = "DeliveryTime", fill = column)) +
+        geom_boxplot() +
+        labs(x = column, y = "Delivery time (min)") +
         theme_minimal()
+    }
+    cols<-c("Time","Weather","Traffic")
+    
+    output$del_time_day <- renderUI({
+      plot_list <- lapply(cols, function(col){
+        card(card_body(plotOutput(paste0("del_time_day_",col))))
+      })
+      do.call(layout_column_wrap,c(plot_list, list(width = 1)))
     })
-    output$distribution_prep <- renderPlot({
-      ggplot(data, aes(x = PreparationTime)) +
-        geom_histogram(binwidth = 2, fill = "steelblue", color = "black") +
-        labs(x = "Prepration Time (min)", y = "Frequency") +
-        theme_minimal()
-    })
-    output$distribution_speed <- renderPlot({
-      ggplot(data, aes(x = Speed)) +
-        geom_histogram(binwidth = 2, fill = "steelblue", color = "black") +
-        labs(x = "Speed (km/h)", y = "Frequency") +
-        theme_minimal()
-    })
-    output$distribution_delivery_time <- renderPlot({
-      ggplot(data, aes(x = DeliveryTime)) +
-        geom_histogram(binwidth = 2, fill = "steelblue", color = "black") +
-        labs(x = "Delivery Time (min)", y = "Frequency") +
-        theme_minimal()
-    })
-    output$distribution_Experience <- renderPlot({
-      ggplot(data, aes(x = Experience)) +
-        geom_histogram(binwidth = 2, fill = "steelblue", color = "black") +
-        labs(x = "Experience (years)", y = "Frequency") +
-        theme_minimal()
-    })
-
-    # Orders by Category
-    output$trafic_orders <- renderPlot({
-      ggplot(data, aes(x = Traffic, fill = Traffic)) +
-        geom_bar() +
-        labs(
-          title = "Number of orders for traffic",
-          y = "Count of Orders",
-          x = "Traffic"
-        ) +
-        theme_minimal()
-    })
-    output$weather_orders <- renderPlot({
-      ggplot(data, aes(x = Weather, fill = Weather)) +
-        geom_bar() +
-        labs(
-          title = "Number of orders for  Weather",
-          y = "Count of Orders",
-          x = " Weather"
-        ) +
-        theme_minimal()
-    })
-    output$time_orders <- renderPlot({
-      ggplot(data, aes(x = Time, fill = Time)) +
-        geom_bar() +
-        labs(
-          title = "Number of orders for  Time",
-          y = "Count of Orders",
-          x = " Time"
-        ) +
-        theme_minimal()
-    })
-    output$delivery_late_orders <- renderPlot({
-      ggplot(data, aes(x = DeliveryLate, fill = DeliveryLate)) +
-        geom_bar() +
-        labs(
-          title = "Number of orders for  Delivery Late",
-          y = "Count of Orders",
-          x = " Delivery Late"
-        ) +
-        theme_minimal()
-    })
-
-    # Correlation
+    
+    for(col in cols) {
+      local({
+        mycol <- col
+        output[[paste0("del_time_day_", mycol)]] <- renderPlot({render_plot(data, mycol)})
+      })
+    }
+  })
+  
+  # Correlation
+  observe({
+    req(dataset())
+    data<-dataset()
+    
     output$corr <- renderPlot({
-      df <- data %>% select(Distance, DeliveryTime, Speed, PreparationTime, Experience, Rating)
+      df <- data %>% select(where(is.numeric),-OrderID)
       cor_matrix <- cor(df)
       ggcorrplot(cor_matrix,
-        hc.order = TRUE, type = "lower",
-        lab = TRUE, lab_size = 3,
-        method = "circle", colors = c("blue", "white", "red")
+                 hc.order = TRUE, type = "lower",
+                 lab = TRUE, lab_size = 3,
+                 method = "square", colors = c("blue", "white", "red")
       )
     })
-
-    # Delivery Time Throughout Day
-    output$time_by_time <- renderPlot({
-      ggplot(data, aes(x = Time, y = DeliveryTime, fill = Time)) +
-        geom_boxplot() +
-        labs(x = "Time", y = "Delivery time (min)") +
-        theme_minimal()
-    })
-    output$time_by_weather <- renderPlot({
-      ggplot(data, aes(x = Weather, y = DeliveryTime, fill = Weather)) +
-        geom_boxplot() +
-        labs(x = "Weather", y = "Delivery time (min)") +
-        theme_minimal()
-    })
-    output$time_by_traffic <- renderPlot({
-      ggplot(data, aes(x = Traffic, y = DeliveryTime, fill = Traffic)) +
-        geom_boxplot() +
-        labs(x = "Traffic", y = "Delivery time (min)") +
-        theme_minimal()
-    })
-
-    # assoucation rules
-    output$rule_late <- renderPlot({
-      df <- data %>% select(Traffic, Vehicle, DeliveryLate, Weather, Time)
-      trans <- as(df, "transactions")
-      ru <- apriori(
-        trans,
-        parameter = list(support = input$support, confidence = input$confidence, minlen = 2),
-        appearance = list(
-          rhs = grep("DeliveryLate=Late", itemLabels(trans), value = TRUE)
-        )
-      )
-      plot(ru, method = "graph", control = list(reorder = TRUE), limit = 10)
-    })
-    output$rule_ontime <- renderPlot({
-      df <- data %>% select(Traffic, Vehicle, DeliveryLate, Weather, Time)
-      trans <- as(df, "transactions")
-      ru <- apriori(
-        trans,
-        parameter = list(support = input$support, confidence = input$confidence, minlen = 2),
-        appearance = list(
-          rhs = grep("DeliveryLate=Ontime", itemLabels(trans), value = TRUE)
-        )
-      )
-      plot(ru, method = "graph", control = list(reorder = TRUE), limit = 10)
-    })
-
-    # kmeans
+  })
+  
+  # kmeans
+  observe({
+    req(dataset())
+    data<-dataset()
+    
     output$kmeans_plot <- renderPlot({
       fviz_cluster(
         kmeans_result()$km,
@@ -513,34 +479,42 @@ server <- function(input, output, session) {
       fviz_nbclust(kmeans_result()$scaled_df, kmeans, method = "silhouette")
     })
     output$kmeans_summary <- renderPrint({
-      kmeans_result()$km
+      aggregate(cbind(Distance, DeliveryTime, Speed) ~ Cluster, data=data, FUN=mean)
     })
-    output$cluster_description <- renderPrint({
-      km <- kmeans_result()
-
-      df <- data %>%
-        select(Speed, Experience,Cluster)
-
-      summary_df <- df %>%
-        group_by(Cluster) %>%
-        summarise(
-          AvgSpeed = mean(Speed),
-          AvgExp = mean(Experience),
+  })
+  
+  # assoucation rules
+  observe({
+    req(dataset())
+    data<-dataset()
+    
+    render_arules<-function(data,flag) {
+      df <- data %>% select(Traffic, Vehicle, DeliveryLate, Weather, Time)
+      trans <- as(df, "transactions")
+      ru <- apriori(
+        trans,
+        parameter = list(support = input$support, confidence = input$confidence, minlen = 2),
+        appearance = list(
+          rhs = grep(paste0("DeliveryLate=",flag), itemLabels(trans), value = TRUE)
         )
-      
-      descriptions<-c()
-
-      for (i in 1:nrow(summary_df)) {
-        row <- summary_df[i, ]
-
-        speed_label <- ifelse(row$AvgSpeed > median(summary_df$AvgSpeed), "High Speed", "Low Speed")
-        exp_label <- ifelse(row$AvgExp > median(summary_df$AvgExp), "Experienced Courier", "Low Experience Courier")
-        descriptions[i] <- paste0("Cluster ", row$Cluster, ": ", speed_label, " — ", exp_label)
-      }
-
-      cat(paste(descriptions, collapse = "\n\n"))
+      )
+      ig<-plot(sort(ru,by ="lift"), method = "grouped", control = list(k = 5) ,limit = 20)
+      ig$layers[[1]]$aes_params$edge_alpha = 0.8
+      ig$layers[[1]]$aes_params$edge_width = 0.8
+      plot(ig)
+    }
+    output$rule_late <- renderPlot({
+      render_arules(data,"Late")
     })
-
+    output$rule_ontime <- renderPlot({
+      render_arules(data,"Ontime")
+    })
+  })
+  
+  observeEvent(dataset(), {
+    req(dataset())
+    data<-dataset()
+    
     if (!is.null(data)) {
       output$download_data <- downloadHandler(
         filename = function() {
