@@ -79,8 +79,8 @@ ui <- page_sidebar(
       nav_panel(
         "Clusters",
         layout_column_wrap(
-          card(card_header("Plot"), card_body(plotOutput("kmeans_plot"))),
-          card(card_header("plot"), card_body(plotOutput("kmeans_improve_plot"))),
+          card(card_body(plotOutput("kmeans_plot"))),
+          card(card_body(plotOutput("kmeans_improve_plot"))),
         ),
         verbatimTextOutput("kmeans_summary")
       ),
@@ -189,16 +189,18 @@ server <- function(input, output, session) {
     }
 
     # Replace NA values with mod to more accurate analysis
-    data_factor_cols <- names(select(data, where(is.character), where(is.factor)))
+    data_categorical_cols <- names(select(data, where(is.character)))
     get_mod <- function(x) {
       ux <- unique(x)
       ux[which.max(tabulate(match(x, ux)))]
     }
-    for (col in data_factor_cols) {
+    for (col in data_categorical_cols) {
       mode_value <- get_mod(data[[col]])
       data[[col]][data[[col]] == ""] <- NA
       data[[col]][is.na(data[[col]])] <- mode_value
     }
+    
+    data$Speed <- data$Distance / (data$DeliveryTime/60)
 
     # Replace outliers with upper or lower bounders
     outliers(data %>% select(where(is.numeric), -OrderID)) # Add data before remove outliers to detect him and show
@@ -233,13 +235,8 @@ server <- function(input, output, session) {
         DeliveryTime = as.numeric(DeliveryTime)
       )
     
-    data$Speed <- data$Distance / (data$DeliveryTime/60)
-    
-    ml <- lm(DeliveryTime ~ Distance +Experience+ Traffic + Weather + Vehicle, data=data)
-    newData<-predict(ml,data)
-    data$ExpectedTime <- newData
-    data$DeliveryLate <- as.factor(ifelse(data$DeliveryTime > data$ExpectedTime, "Late", "Ontime"))
-    data <- data %>% select(-ExpectedTime)
+    Q3 <- quantile(data$DeliveryTime, 0.75)
+    data$DeliveryLate <- as.factor(ifelse(data$DeliveryTime >= Q3, "Late", "Ontime"))
 
     df_k <- data %>% select(Distance,DeliveryTime)
     scaled_df <- scale(df_k)
@@ -479,7 +476,7 @@ server <- function(input, output, session) {
       fviz_nbclust(kmeans_result()$scaled_df, kmeans, method = "silhouette")
     })
     output$kmeans_summary <- renderPrint({
-      aggregate(cbind(Distance, DeliveryTime, Speed) ~ Cluster, data=data, FUN=mean)
+      aggregate(cbind(Distance, DeliveryTime) ~ Cluster, data=data, FUN=mean)
     })
   })
   
@@ -498,7 +495,7 @@ server <- function(input, output, session) {
           rhs = grep(paste0("DeliveryLate=",flag), itemLabels(trans), value = TRUE)
         )
       )
-      ig<-plot(sort(ru,by ="lift"), method = "grouped", control = list(k = 5) ,limit = 20)
+      ig<-plot(sort(ru,by ="lift"), method = "graph" ,limit = 15)
       ig$layers[[1]]$aes_params$edge_alpha = 0.8
       ig$layers[[1]]$aes_params$edge_width = 0.8
       plot(ig)
